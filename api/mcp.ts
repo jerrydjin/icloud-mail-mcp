@@ -1,11 +1,11 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { ImapProvider } from "../src/providers/imap.ts";
-import { SmtpProvider } from "../src/providers/smtp.ts";
-import { registerReadTools } from "../src/tools/read.ts";
-import { registerWriteTools } from "../src/tools/write.ts";
-import { registerManageTools } from "../src/tools/manage.ts";
+import { ImapProvider } from "../src/providers/imap.js";
+import { SmtpProvider } from "../src/providers/smtp.js";
+import { registerReadTools } from "../src/tools/read.js";
+import { registerWriteTools } from "../src/tools/write.js";
+import { registerManageTools } from "../src/tools/manage.js";
 
 function createServer(): {
   server: McpServer;
