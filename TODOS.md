@@ -15,6 +15,12 @@ Shipped in v2.0.0. ServiceProvider interface in types.ts, implemented by ImapPro
 **Context:** Current flat naming works fine at 23 tools. Revisit when adding CardDAV (Contacts) or VTODO (Reminders) providers.
 **Depends on:** A 4th provider being planned.
 
+## v3: DST oracle / "what time is it really?" tool
+**What:** A standalone tool that answers "what time is it in X timezone right now?" and "when does DST change next in X?" without needing a calendar event context.
+**Why:** Users scheduling across zones need to check current offsets and upcoming DST transitions. Currently they have to create a throwaway event to see how timezones resolve.
+**Context:** The timezone utility module (src/utils/timezone.ts) already has resolveTimezone, formatInTimezone, and IANA validation. A DST oracle would layer on top: use Intl.DateTimeFormat to detect current offset, then probe future dates to find the next transition. Pure computation, no external API needed.
+**Depends on:** v2.1 timezone intelligence shipped.
+
 ## v3: update_event with ETag conditional PUT
 **What:** Add an `update_event` tool that modifies existing calendar events using CalDAV conditional PUT with If-Match ETag.
 **Why:** Users want to reschedule, add attendees, change descriptions on existing events. Currently they must delete + recreate.

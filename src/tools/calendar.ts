@@ -1,6 +1,21 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CalDavProvider } from "../providers/caldav.ts";
+import type { CalendarEvent } from "../types.ts";
+import { resolveTimezone, formatInTimezone } from "../utils/timezone.ts";
+
+function formatEventForDisplay(event: CalendarEvent, displayTimezone: string) {
+  return {
+    ...event,
+    startDisplay: event.isAllDay
+      ? event.start.utc
+      : formatInTimezone(event.start.utc, displayTimezone),
+    endDisplay: event.isAllDay
+      ? event.end.utc
+      : formatInTimezone(event.end.utc, displayTimezone),
+    displayTimezone,
+  };
+}
 
 export function registerCalendarTools(
   server: McpServer,
@@ -37,7 +52,7 @@ export function registerCalendarTools(
 
   server.tool(
     "list_events",
-    "List calendar events within a time range. Defaults to today if no range specified.",
+    "List calendar events within a time range. Defaults to today if no range specified. Times are displayed in the requested timezone.",
     {
       calendar: z
         .string()
@@ -60,10 +75,17 @@ export function registerCalendarTools(
         .optional()
         .default(50)
         .describe("Maximum events to return (max 200)"),
+      timezone: z
+        .string()
+        .optional()
+        .describe(
+          "IANA timezone for display (e.g., 'Australia/Melbourne'). Defaults to system timezone."
+        ),
     },
-    async ({ calendar, start, end, limit }) => {
+    async ({ calendar, start, end, limit, timezone }) => {
       try {
         const calendarUrl = await caldavProvider.resolveCalendarUrl(calendar);
+        const displayTz = resolveTimezone(timezone);
 
         const now = new Date();
         const startDate = start
@@ -79,13 +101,16 @@ export function registerCalendarTools(
           endDate
         );
         const limited = events.slice(0, limit);
+        const displayed = limited.map((e) =>
+          formatEventForDisplay(e, displayTz)
+        );
 
         return {
           content: [
             {
               type: "text" as const,
               text: JSON.stringify(
-                { events: limited, total: events.length },
+                { events: displayed, total: events.length, displayTimezone: displayTz },
                 null,
                 2
               ),
@@ -108,7 +133,7 @@ export function registerCalendarTools(
 
   server.tool(
     "get_event",
-    "Get full details of a calendar event by UID",
+    "Get full details of a calendar event by UID. Times are displayed in the requested timezone.",
     {
       uid: z.string().describe("Event UID"),
       calendar: z
@@ -117,10 +142,17 @@ export function registerCalendarTools(
         .describe(
           "Calendar display name or URL (default: primary calendar)"
         ),
+      timezone: z
+        .string()
+        .optional()
+        .describe(
+          "IANA timezone for display (e.g., 'Australia/Melbourne'). Defaults to system timezone."
+        ),
     },
-    async ({ uid, calendar }) => {
+    async ({ uid, calendar, timezone }) => {
       try {
         const calendarUrl = await caldavProvider.resolveCalendarUrl(calendar);
+        const displayTz = resolveTimezone(timezone);
         const event = await caldavProvider.getEvent(calendarUrl, uid);
 
         if (!event) {
@@ -135,11 +167,13 @@ export function registerCalendarTools(
           };
         }
 
+        const displayed = formatEventForDisplay(event, displayTz);
+
         return {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify(event, null, 2),
+              text: JSON.stringify(displayed, null, 2),
             },
           ],
         };
@@ -159,16 +193,30 @@ export function registerCalendarTools(
 
   server.tool(
     "create_event",
-    "Create a new calendar event on iCloud Calendar",
+    "Create a new calendar event on iCloud Calendar. Pass local time + timezone (e.g., start='2026-04-15T15:00:00', timezone='Australia/Melbourne').",
     {
       summary: z.string().describe("Event title"),
-      start: z.string().describe("Start time (ISO 8601)"),
-      end: z.string().describe("End time (ISO 8601)"),
+      start: z
+        .string()
+        .describe(
+          "Start time (ISO 8601 local time, no Z suffix when using timezone)"
+        ),
+      end: z
+        .string()
+        .describe(
+          "End time (ISO 8601 local time, no Z suffix when using timezone)"
+        ),
       calendar: z
         .string()
         .optional()
         .describe(
           "Calendar display name or URL (default: primary calendar)"
+        ),
+      timezone: z
+        .string()
+        .optional()
+        .describe(
+          "IANA timezone (e.g., 'Australia/Melbourne'). Event times are interpreted in this timezone. Defaults to system timezone."
         ),
       location: z.string().optional().describe("Event location"),
       description: z.string().optional().describe("Event description"),
@@ -182,13 +230,14 @@ export function registerCalendarTools(
         .default(false)
         .describe("Whether this is an all-day event"),
     },
-    async ({ summary, start, end, calendar, location, description, attendees, isAllDay }) => {
+    async ({ summary, start, end, calendar, timezone, location, description, attendees, isAllDay }) => {
       try {
         const calendarUrl = await caldavProvider.resolveCalendarUrl(calendar);
         const event = await caldavProvider.createEvent(calendarUrl, {
           summary,
           start,
           end,
+          timezone,
           location,
           description,
           attendees,
@@ -196,12 +245,15 @@ export function registerCalendarTools(
           calendar,
         });
 
+        const displayTz = resolveTimezone(timezone);
+        const displayed = formatEventForDisplay(event, displayTz);
+
         return {
           content: [
             {
               type: "text" as const,
               text: JSON.stringify(
-                { uid: event.uid, success: true, event },
+                { uid: event.uid, success: true, event: displayed },
                 null,
                 2
               ),

@@ -4,6 +4,21 @@ import type { ImapProvider } from "../providers/imap.ts";
 import type { SmtpProvider } from "../providers/smtp.ts";
 import type { CalDavProvider } from "../providers/caldav.ts";
 import type { CalendarEvent, MessageSummary } from "../types.ts";
+import { resolveTimezone, formatInTimezone } from "../utils/timezone.ts";
+
+/**
+ * Get the UTC offset in milliseconds for a given date and timezone.
+ * Positive means ahead of UTC (e.g., +11h for AEDT).
+ */
+function getTimezoneOffsetMs(dateStr: string, timezone: string): number {
+  // Create a date at midnight UTC for the given date
+  const utcDate = new Date(dateStr + "T00:00:00Z");
+  // Format that UTC instant in the target timezone to get the local representation
+  const localStr = utcDate.toLocaleString("en-US", { timeZone: timezone });
+  const localDate = new Date(localStr);
+  // The difference tells us the offset
+  return localDate.getTime() - utcDate.getTime();
+}
 
 export function registerCrossTools(
   server: McpServer,
@@ -14,33 +29,46 @@ export function registerCrossTools(
 ) {
   server.tool(
     "daily_brief",
-    "Get a combined daily overview: all calendar events across all calendars + unread mail summary. One tool call, full morning context.",
+    "Get a combined daily overview: all calendar events across all calendars + unread mail summary. One tool call, full morning context. Times displayed in your timezone.",
     {
       date: z
         .string()
         .optional()
         .describe("Date to brief (ISO 8601 date, default: today)"),
+      timezone: z
+        .string()
+        .optional()
+        .describe(
+          "IANA timezone for display and day boundaries (e.g., 'Australia/Melbourne'). Defaults to system timezone."
+        ),
     },
-    async ({ date }) => {
+    async ({ date, timezone }) => {
+      const displayTz = resolveTimezone(timezone);
       const now = new Date();
-      const targetDate = date ? new Date(date) : now;
-      const dayStart = new Date(
-        targetDate.getFullYear(),
-        targetDate.getMonth(),
-        targetDate.getDate()
+
+      // Determine the target date string (YYYY-MM-DD) in the display timezone
+      const dateStr =
+        date ||
+        now.toLocaleDateString("en-CA", { timeZone: displayTz });
+
+      // Compute midnight in the target timezone as a UTC instant
+      // Midnight local = midnight UTC minus the timezone offset
+      const offsetMs = getTimezoneOffsetMs(dateStr, displayTz);
+      const dayStartUtc = new Date(
+        new Date(dateStr + "T00:00:00Z").getTime() - offsetMs
       );
-      const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+      const dayEndUtc = new Date(dayStartUtc.getTime() + 24 * 60 * 60 * 1000);
 
       // Fetch calendars first, then fan out events across all of them
       let allEvents: CalendarEvent[] = [];
       let calendarError: string | undefined;
-      let nextEvent: CalendarEvent | undefined;
+      let nextEvent: (CalendarEvent & { startDisplay?: string; endDisplay?: string }) | undefined;
 
       try {
         const calendars = await caldavProvider.listCalendars();
         const eventResults = await Promise.allSettled(
           calendars.map((cal) =>
-            caldavProvider.listEvents(cal.url, dayStart, dayEnd)
+            caldavProvider.listEvents(cal.url, dayStartUtc, dayEndUtc)
           )
         );
 
@@ -50,17 +78,24 @@ export function registerCrossTools(
           }
         }
 
-        // Sort by start time
+        // Sort by start time (UTC instant)
         allEvents.sort(
           (a, b) =>
-            new Date(a.start).getTime() - new Date(b.start).getTime()
+            new Date(a.start.utc).getTime() - new Date(b.start.utc).getTime()
         );
 
         // Find next upcoming event
         const nowTime = now.getTime();
         nextEvent = allEvents.find(
-          (e) => !e.isAllDay && new Date(e.start).getTime() > nowTime
+          (e) => !e.isAllDay && new Date(e.start.utc).getTime() > nowTime
         );
+        if (nextEvent) {
+          nextEvent = {
+            ...nextEvent,
+            startDisplay: formatInTimezone(nextEvent.start.utc, displayTz),
+            endDisplay: formatInTimezone(nextEvent.end.utc, displayTz),
+          };
+        }
 
         const failedCount = eventResults.filter(
           (r) => r.status === "rejected"
@@ -71,6 +106,17 @@ export function registerCrossTools(
       } catch (error) {
         calendarError = `Calendar fetch failed: ${error instanceof Error ? error.message : String(error)}`;
       }
+
+      // Add display times to all events
+      const displayedEvents = allEvents.map((e) => ({
+        ...e,
+        startDisplay: e.isAllDay
+          ? e.start.utc
+          : formatInTimezone(e.start.utc, displayTz),
+        endDisplay: e.isAllDay
+          ? e.end.utc
+          : formatInTimezone(e.end.utc, displayTz),
+      }));
 
       // Fetch mail in parallel
       let unreadCount = 0;
@@ -100,9 +146,10 @@ export function registerCrossTools(
       }
 
       const brief: Record<string, unknown> = {
-        date: dayStart.toISOString().split("T")[0],
+        date: dateStr,
+        displayTimezone: displayTz,
         calendar: {
-          events: allEvents,
+          events: displayedEvents,
           eventCount: allEvents.length,
           nextEvent: nextEvent ?? null,
           ...(calendarError ? { error: calendarError } : {}),
@@ -212,6 +259,12 @@ export function registerCrossTools(
           fromName,
         });
 
+        // Format event time in its original timezone for the response
+        const eventTimeTz = event.start.timezone;
+        const eventTimeDisplay = event.isAllDay
+          ? event.start.utc
+          : formatInTimezone(event.start.utc, eventTimeTz);
+
         return {
           content: [
             {
@@ -222,6 +275,8 @@ export function registerCrossTools(
                   recipientCount: recipients.length,
                   recipients,
                   eventSummary: event.summary,
+                  eventTime: eventTimeDisplay,
+                  eventTimezone: eventTimeTz,
                 },
                 null,
                 2

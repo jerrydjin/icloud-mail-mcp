@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import ICAL from "ical.js";
+import {
+  resolveTimezone,
+  validateTimezone,
+  formatInTimezone,
+  buildVTimezone,
+  registerTimezone,
+} from "../src/utils/timezone.ts";
 
 // ── VTODO Filtering ──
 // Mirrors the filter in CalDavProvider.listCalendars()
@@ -120,6 +127,11 @@ describe("resolveCalendarUrl", () => {
 // ── iCalendar Parsing ──
 // Tests the parseVEvent logic using ical.js directly
 
+interface TimezoneAwareTime {
+  utc: string;
+  timezone: string;
+}
+
 function parseVEvent(vcalendarData: string) {
   const jcalData = ICAL.parse(vcalendarData);
   const comp = new ICAL.Component(jcalData);
@@ -131,15 +143,18 @@ function parseVEvent(vcalendarData: string) {
   const endDate = event.endDate;
   const isAllDay = startDate.isDate;
 
-  let start: string;
-  let end: string;
+  const startTzid = startDate.zone?.tzid || "UTC";
+  const endTzid = endDate.zone?.tzid || "UTC";
+
+  let start: TimezoneAwareTime;
+  let end: TimezoneAwareTime;
 
   if (isAllDay) {
-    start = startDate.toString();
-    end = endDate.toString();
+    start = { utc: startDate.toString(), timezone: startTzid };
+    end = { utc: endDate.toString(), timezone: endTzid };
   } else {
-    start = startDate.toJSDate().toISOString();
-    end = endDate.toJSDate().toISOString();
+    start = { utc: startDate.toJSDate().toISOString(), timezone: startTzid };
+    end = { utc: endDate.toJSDate().toISOString(), timezone: endTzid };
   }
 
   const attendees: { email: string; name?: string; status?: string }[] = [];
@@ -233,25 +248,27 @@ END:VEVENT
 END:VCALENDAR`;
 
 describe("parseVEvent", () => {
-  test("parses simple timed event", () => {
+  test("parses simple timed event with TimezoneAwareTime", () => {
     const result = parseVEvent(SIMPLE_EVENT);
     expect(result).not.toBeNull();
     expect(result!.uid).toBe("test-uid-123");
     expect(result!.summary).toBe("Team Meeting");
-    expect(result!.start).toBe("2026-04-15T14:00:00.000Z");
-    expect(result!.end).toBe("2026-04-15T15:00:00.000Z");
+    expect(result!.start.utc).toBe("2026-04-15T14:00:00.000Z");
+    expect(result!.start.timezone).toBe("UTC");
+    expect(result!.end.utc).toBe("2026-04-15T15:00:00.000Z");
+    expect(result!.end.timezone).toBe("UTC");
     expect(result!.location).toBe("Conference Room B");
     expect(result!.description).toBe("Weekly sync");
     expect(result!.isAllDay).toBe(false);
   });
 
-  test("parses all-day event", () => {
+  test("parses all-day event with TimezoneAwareTime", () => {
     const result = parseVEvent(ALLDAY_EVENT);
     expect(result).not.toBeNull();
     expect(result!.uid).toBe("allday-001");
     expect(result!.isAllDay).toBe(true);
-    expect(result!.start).toBe("2026-05-01");
-    expect(result!.end).toBe("2026-05-02");
+    expect(result!.start.utc).toBe("2026-05-01");
+    expect(result!.end.utc).toBe("2026-05-02");
   });
 
   test("parses attendees", () => {
@@ -289,8 +306,7 @@ END:VCALENDAR`;
     expect(parseVEvent(vtodo)).toBeNull();
   });
 
-  test("normalizes timezone to UTC", () => {
-    // A floating time (no Z, no TZID) should still produce a valid date
+  test("handles floating time (no TZID, no Z)", () => {
     const floating = `BEGIN:VCALENDAR
 VERSION:2.0
 BEGIN:VEVENT
@@ -302,9 +318,51 @@ END:VEVENT
 END:VCALENDAR`;
     const result = parseVEvent(floating);
     expect(result).not.toBeNull();
-    // Should still produce an ISO string (toJSDate handles floating as local→UTC)
-    expect(result!.start).toContain("2026-04-15");
+    expect(result!.start.utc).toContain("2026-04-15");
+    // Floating times have no zone, ical.js reports "floating" or similar
     expect(result!.isAllDay).toBe(false);
+  });
+
+  test("preserves TZID from event with VTIMEZONE", () => {
+    const melbourneEvent = `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VTIMEZONE
+TZID:Australia/Melbourne
+BEGIN:STANDARD
+TZNAME:AEST
+TZOFFSETFROM:+1100
+TZOFFSETTO:+1000
+DTSTART:19700405T030000
+RRULE:FREQ=YEARLY;BYMONTH=4;BYDAY=1SU
+END:STANDARD
+BEGIN:DAYLIGHT
+TZNAME:AEDT
+TZOFFSETFROM:+1000
+TZOFFSETTO:+1100
+DTSTART:19701004T020000
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=1SU
+END:DAYLIGHT
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:tz-001
+SUMMARY:Melbourne Meeting
+DTSTART;TZID=Australia/Melbourne:20260415T150000
+DTEND;TZID=Australia/Melbourne:20260415T160000
+END:VEVENT
+END:VCALENDAR`;
+    const result = parseVEvent(melbourneEvent);
+    expect(result).not.toBeNull();
+    expect(result!.start.timezone).toBe("Australia/Melbourne");
+    expect(result!.end.timezone).toBe("Australia/Melbourne");
+    // UTC should be the converted instant (AEST is +10 in April = standard time)
+    expect(result!.start.utc).toBe("2026-04-15T05:00:00.000Z");
+    expect(result!.end.utc).toBe("2026-04-15T06:00:00.000Z");
+  });
+
+  test("UTC event has timezone 'UTC'", () => {
+    const result = parseVEvent(SIMPLE_EVENT);
+    expect(result).not.toBeNull();
+    expect(result!.start.timezone).toBe("UTC");
   });
 });
 
@@ -333,5 +391,150 @@ describe("recurrence expansion", () => {
     expect(occurrences).toHaveLength(5);
     expect(occurrences[0]).toBe("2026-04-13T09:00:00.000Z");
     expect(occurrences[4]).toBe("2026-04-17T09:00:00.000Z");
+  });
+});
+
+// ── Timezone Utilities ──
+
+describe("timezone utilities", () => {
+  test("validateTimezone accepts valid IANA timezone", () => {
+    expect(() => validateTimezone("Australia/Melbourne")).not.toThrow();
+    expect(() => validateTimezone("Europe/London")).not.toThrow();
+    expect(() => validateTimezone("America/New_York")).not.toThrow();
+    expect(() => validateTimezone("UTC")).not.toThrow();
+  });
+
+  test("validateTimezone rejects invalid timezone", () => {
+    expect(() => validateTimezone("Not/A/Timezone")).toThrow(
+      "Invalid IANA timezone"
+    );
+    expect(() => validateTimezone("AEST")).toThrow("Invalid IANA timezone");
+    expect(() => validateTimezone("")).toThrow();
+  });
+
+  test("resolveTimezone returns explicit param when provided", () => {
+    expect(resolveTimezone("Australia/Melbourne")).toBe("Australia/Melbourne");
+  });
+
+  test("resolveTimezone falls back to env var", () => {
+    const original = process.env.DEFAULT_TIMEZONE;
+    process.env.DEFAULT_TIMEZONE = "Europe/London";
+    try {
+      expect(resolveTimezone()).toBe("Europe/London");
+    } finally {
+      if (original) {
+        process.env.DEFAULT_TIMEZONE = original;
+      } else {
+        delete process.env.DEFAULT_TIMEZONE;
+      }
+    }
+  });
+
+  test("resolveTimezone falls back to OS timezone", () => {
+    const original = process.env.DEFAULT_TIMEZONE;
+    delete process.env.DEFAULT_TIMEZONE;
+    try {
+      const result = resolveTimezone();
+      // Should return a valid IANA timezone
+      expect(() => validateTimezone(result)).not.toThrow();
+    } finally {
+      if (original) {
+        process.env.DEFAULT_TIMEZONE = original;
+      }
+    }
+  });
+
+  test("formatInTimezone converts UTC to Melbourne time", () => {
+    // 2026-04-15T05:00:00Z = 3:00 PM AEST (April is standard time, +10)
+    const result = formatInTimezone(
+      "2026-04-15T05:00:00.000Z",
+      "Australia/Melbourne"
+    );
+    expect(result).toContain("3:00:00 PM");
+  });
+
+  test("formatInTimezone converts UTC to London time", () => {
+    // 2026-04-15T05:00:00Z = 6:00 AM BST (April is summer time, +1)
+    const result = formatInTimezone(
+      "2026-04-15T05:00:00.000Z",
+      "Europe/London"
+    );
+    expect(result).toContain("6:00:00 AM");
+  });
+
+  test("buildVTimezone returns valid VTIMEZONE string", () => {
+    const vtimezone = buildVTimezone("Australia/Melbourne");
+    expect(vtimezone).toContain("BEGIN:VTIMEZONE");
+    expect(vtimezone).toContain("TZID:Australia/Melbourne");
+    expect(vtimezone).toContain("END:VTIMEZONE");
+  });
+
+  test("buildVTimezone result is parseable by ical.js", () => {
+    const vtimezone = buildVTimezone("Europe/London");
+    const comp = ICAL.Component.fromString(vtimezone);
+    expect(comp.name).toBe("vtimezone");
+    expect(comp.getFirstPropertyValue("tzid")).toBe("Europe/London");
+  });
+
+  test("registerTimezone creates usable ICAL.Timezone", () => {
+    const tz = registerTimezone("America/New_York");
+    expect(tz.tzid).toBe("America/New_York");
+
+    // Create a time in this timezone
+    const time = ICAL.Time.fromDateTimeString("2026-04-15T15:00:00");
+    time.zone = tz;
+    const utc = time.toJSDate().toISOString();
+    // 3pm EDT (UTC-4 in April) = 7pm UTC
+    expect(utc).toBe("2026-04-15T19:00:00.000Z");
+  });
+
+  test("registerTimezone is idempotent", () => {
+    const tz1 = registerTimezone("Australia/Melbourne");
+    const tz2 = registerTimezone("Australia/Melbourne");
+    expect(tz1.tzid).toBe(tz2.tzid);
+  });
+});
+
+// ── VCALENDAR generation with VTIMEZONE ──
+
+describe("VCALENDAR generation with timezone", () => {
+  test("creates event with TZID and VTIMEZONE", () => {
+    const timezone = "Australia/Melbourne";
+    const icalTz = registerTimezone(timezone);
+    const vtimezoneStr = buildVTimezone(timezone);
+
+    const vcalendar = new ICAL.Component(["vcalendar", [], []]);
+    vcalendar.updatePropertyWithValue("prodid", "-//test//EN");
+    vcalendar.updatePropertyWithValue("version", "2.0");
+    vcalendar.addSubcomponent(ICAL.Component.fromString(vtimezoneStr));
+
+    const vevent = new ICAL.Component("vevent");
+    vevent.updatePropertyWithValue("uid", "tz-test-001");
+    vevent.updatePropertyWithValue("summary", "Melbourne Meeting");
+
+    const startTime = ICAL.Time.fromDateTimeString("2026-04-15T15:00:00");
+    startTime.zone = icalTz;
+    vevent.updatePropertyWithValue("dtstart", startTime);
+    vevent.getFirstProperty("dtstart")!.setParameter("tzid", timezone);
+
+    const endTime = ICAL.Time.fromDateTimeString("2026-04-15T16:00:00");
+    endTime.zone = icalTz;
+    vevent.updatePropertyWithValue("dtend", endTime);
+    vevent.getFirstProperty("dtend")!.setParameter("tzid", timezone);
+
+    vcalendar.addSubcomponent(vevent);
+    const icalString = vcalendar.toString();
+
+    // Verify the output contains TZID and VTIMEZONE
+    expect(icalString).toContain("TZID=Australia/Melbourne");
+    expect(icalString).toContain("BEGIN:VTIMEZONE");
+    expect(icalString).toContain("TZID:Australia/Melbourne");
+
+    // Round-trip: parse the output and verify timezone is preserved
+    const parsed = parseVEvent(icalString);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.start.timezone).toBe("Australia/Melbourne");
+    // 3pm AEST (+10) = 5am UTC
+    expect(parsed!.start.utc).toBe("2026-04-15T05:00:00.000Z");
   });
 });

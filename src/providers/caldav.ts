@@ -6,7 +6,13 @@ import type {
   CalendarEvent,
   CreateEventInput,
   EventAttendee,
+  TimezoneAwareTime,
 } from "../types.ts";
+import {
+  resolveTimezone,
+  registerTimezone,
+  buildVTimezone,
+} from "../utils/timezone.ts";
 
 // CalDAV is stateless HTTP with Basic auth per request.
 // No persistent connection, no keepalive, no NOOP equivalent.
@@ -117,9 +123,10 @@ export class CalDavProvider implements ServiceProvider {
       }
     }
 
-    // Sort by start time
+    // Sort by start time (using UTC instant)
     events.sort(
-      (a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()
+      (a, b) =>
+        new Date(a.start.utc).getTime() - new Date(b.start.utc).getTime()
     );
 
     return events;
@@ -164,10 +171,24 @@ export class CalDavProvider implements ServiceProvider {
   ): Promise<CalendarEvent> {
     await this.ensureConnected();
 
+    const timezone = resolveTimezone(event.timezone);
+
+    // Reject ambiguous input: UTC (Z suffix) + explicit timezone
+    if (
+      event.timezone &&
+      !event.isAllDay &&
+      (event.start.endsWith("Z") || event.end.endsWith("Z"))
+    ) {
+      throw new Error(
+        "Ambiguous input: UTC time (Z suffix) cannot be combined with a timezone parameter. " +
+          "Either pass local time with a timezone, or pass UTC without a timezone."
+      );
+    }
+
     const uid = crypto.randomUUID();
     const calendarName = await this.getCalendarName(calendarUrl);
 
-    // Build VCALENDAR using ical.js (ICAL.Component API for generation)
+    // Build VCALENDAR with VTIMEZONE component
     const comp = new ICAL.Component(["vcalendar", [], []]);
     comp.updatePropertyWithValue("prodid", "-//icloud-bridge//v2.0.0//EN");
     comp.updatePropertyWithValue("version", "2.0");
@@ -179,6 +200,7 @@ export class CalDavProvider implements ServiceProvider {
     vevent.updatePropertyWithValue("dtstamp", ICAL.Time.now());
 
     if (event.isAllDay) {
+      // All-day events: DATE-only, no timezone (per RFC 5545)
       const startStr = event.start.split("T")[0] ?? event.start;
       const endStr = event.end.split("T")[0] ?? event.end;
       const startTime = ICAL.Time.fromDateString(startStr);
@@ -189,13 +211,24 @@ export class CalDavProvider implements ServiceProvider {
       endTime.isDate = true;
       vevent.updatePropertyWithValue("dtend", endTime);
     } else {
-      const startTime = ICAL.Time.fromDateTimeString(event.start);
-      startTime.zone = ICAL.Timezone.utcTimezone;
-      vevent.updatePropertyWithValue("dtstart", startTime);
+      // Register timezone and add VTIMEZONE to VCALENDAR
+      const icalTz = registerTimezone(timezone);
+      const vtimezoneStr = buildVTimezone(timezone);
+      comp.addSubcomponent(ICAL.Component.fromString(vtimezoneStr));
 
-      const endTime = ICAL.Time.fromDateTimeString(event.end);
-      endTime.zone = ICAL.Timezone.utcTimezone;
+      // Strip Z suffix if present (for backward compat with UTC inputs)
+      const startStr = event.start.replace(/Z$/, "");
+      const endStr = event.end.replace(/Z$/, "");
+
+      const startTime = ICAL.Time.fromDateTimeString(startStr);
+      startTime.zone = icalTz;
+      vevent.updatePropertyWithValue("dtstart", startTime);
+      vevent.getFirstProperty("dtstart")!.setParameter("tzid", timezone);
+
+      const endTime = ICAL.Time.fromDateTimeString(endStr);
+      endTime.zone = icalTz;
       vevent.updatePropertyWithValue("dtend", endTime);
+      vevent.getFirstProperty("dtend")!.setParameter("tzid", timezone);
     }
 
     if (event.location) {
@@ -227,15 +260,23 @@ export class CalDavProvider implements ServiceProvider {
 
     const resultObj = result as unknown as Record<string, unknown> | undefined;
 
+    // Build TimezoneAwareTime for the return value
+    let startTz: TimezoneAwareTime;
+    let endTz: TimezoneAwareTime;
+
+    if (event.isAllDay) {
+      startTz = { utc: event.start.split("T")[0] ?? event.start, timezone };
+      endTz = { utc: event.end.split("T")[0] ?? event.end, timezone };
+    } else {
+      startTz = { utc: this.localToUtc(event.start, timezone), timezone };
+      endTz = { utc: this.localToUtc(event.end, timezone), timezone };
+    }
+
     return {
       uid,
       summary: event.summary,
-      start: event.isAllDay
-        ? (event.start.split("T")[0] ?? event.start)
-        : new Date(event.start).toISOString(),
-      end: event.isAllDay
-        ? (event.end.split("T")[0] ?? event.end)
-        : new Date(event.end).toISOString(),
+      start: startTz,
+      end: endTz,
       location: event.location,
       description: event.description,
       attendees: (event.attendees ?? []).map((e) => ({
@@ -246,10 +287,20 @@ export class CalDavProvider implements ServiceProvider {
       isAllDay: event.isAllDay ?? false,
       calendarUrl,
       calendarName,
-      url:
-        (resultObj?.url as string) ?? `${calendarUrl}${uid}.ics`,
+      url: (resultObj?.url as string) ?? `${calendarUrl}${uid}.ics`,
       etag: resultObj?.etag as string | undefined,
     };
+  }
+
+  /**
+   * Convert a local time string in a given timezone to a UTC ISO string.
+   */
+  private localToUtc(localISO: string, timezone: string): string {
+    // Use ical.js to do the conversion via the registered timezone
+    const icalTz = registerTimezone(timezone);
+    const time = ICAL.Time.fromDateTimeString(localISO.replace(/Z$/, ""));
+    time.zone = icalTz;
+    return time.toJSDate().toISOString();
   }
 
   async deleteEvent(calendarUrl: string, uid: string): Promise<boolean> {
@@ -330,21 +381,24 @@ export class CalDavProvider implements ServiceProvider {
 
     const event = new ICAL.Event(vevent);
 
-    // Normalize times to UTC
+    // Preserve timezone from DTSTART/DTEND
     const startDate = event.startDate;
     const endDate = event.endDate;
     const isAllDay = startDate.isDate;
 
-    let start: string;
-    let end: string;
+    // Extract TZID: from the zone property, or fall back to UTC/default
+    const startTzid = startDate.zone?.tzid || "UTC";
+    const endTzid = endDate.zone?.tzid || "UTC";
+
+    let start: TimezoneAwareTime;
+    let end: TimezoneAwareTime;
 
     if (isAllDay) {
-      start = startDate.toString();
-      end = endDate.toString();
+      start = { utc: startDate.toString(), timezone: startTzid };
+      end = { utc: endDate.toString(), timezone: endTzid };
     } else {
-      // Convert to UTC ISO 8601 with Z suffix
-      start = startDate.toJSDate().toISOString();
-      end = endDate.toJSDate().toISOString();
+      start = { utc: startDate.toJSDate().toISOString(), timezone: startTzid };
+      end = { utc: endDate.toJSDate().toISOString(), timezone: endTzid };
     }
 
     // Extract attendees
@@ -425,14 +479,16 @@ export class CalDavProvider implements ServiceProvider {
           const occEnd = next.clone();
           occEnd.addDuration(duration);
 
+          // Each occurrence inherits the master event's timezone
+          const occTzid = masterEvent.start.timezone;
           events.push({
             ...masterEvent,
             start: masterEvent.isAllDay
-              ? next.toString()
-              : next.toJSDate().toISOString(),
+              ? { utc: next.toString(), timezone: occTzid }
+              : { utc: next.toJSDate().toISOString(), timezone: occTzid },
             end: masterEvent.isAllDay
-              ? occEnd.toString()
-              : occEnd.toJSDate().toISOString(),
+              ? { utc: occEnd.toString(), timezone: occTzid }
+              : { utc: occEnd.toJSDate().toISOString(), timezone: occTzid },
           });
         }
 

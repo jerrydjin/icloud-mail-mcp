@@ -55,6 +55,11 @@ export interface DraftResult {
 
 // --- Calendar types (v2) ---
 
+export interface TimezoneAwareTime {
+  utc: string; // ISO 8601 UTC (Z suffix) — the canonical instant
+  timezone: string; // IANA timezone (e.g., "Australia/Melbourne")
+}
+
 export interface ServiceProvider {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -72,8 +77,8 @@ export interface CalendarInfo {
 export interface CalendarEvent {
   uid: string;
   summary: string;
-  start: string; // ISO 8601 UTC (Z suffix)
-  end: string; // ISO 8601 UTC (Z suffix)
+  start: TimezoneAwareTime;
+  end: TimezoneAwareTime;
   location?: string;
   description?: string;
   attendees: EventAttendee[];
@@ -94,8 +99,9 @@ export interface EventAttendee {
 
 export interface CreateEventInput {
   summary: string;
-  start: string; // ISO 8601
-  end: string; // ISO 8601
+  start: string; // ISO 8601 local time (no Z suffix when timezone provided)
+  end: string; // ISO 8601 local time (no Z suffix when timezone provided)
+  timezone?: string; // IANA timezone — resolved via cascade if omitted
   location?: string;
   description?: string;
   attendees?: string[]; // email addresses
