@@ -6,7 +6,7 @@ import type {
   MessageSummary,
   MessageFull,
   EmailAddress,
-} from "../types.ts";
+} from "../types.js";
 
 // NOTE: UIDVALIDITY is not tracked in v1. UIDs are assumed stable for this
 // single-user personal tool. If UIDVALIDITY changes (rare on iCloud), UIDs

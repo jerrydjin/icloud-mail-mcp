@@ -7,12 +7,12 @@ import type {
   CreateEventInput,
   EventAttendee,
   TimezoneAwareTime,
-} from "../types.ts";
+} from "../types.js";
 import {
   resolveTimezone,
   registerTimezone,
   buildVTimezone,
-} from "../utils/timezone.ts";
+} from "../utils/timezone.js";
 
 // CalDAV is stateless HTTP with Basic auth per request.
 // No persistent connection, no keepalive, no NOOP equivalent.

@@ -31,14 +31,14 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ImapProvider } from "./providers/imap.ts";
-import { SmtpProvider } from "./providers/smtp.ts";
-import { CalDavProvider } from "./providers/caldav.ts";
-import { registerReadTools } from "./tools/read.ts";
-import { registerWriteTools } from "./tools/write.ts";
-import { registerManageTools } from "./tools/manage.ts";
-import { registerCalendarTools } from "./tools/calendar.ts";
-import { registerCrossTools } from "./tools/cross.ts";
+import { ImapProvider } from "./providers/imap.js";
+import { SmtpProvider } from "./providers/smtp.js";
+import { CalDavProvider } from "./providers/caldav.js";
+import { registerReadTools } from "./tools/read.js";
+import { registerWriteTools } from "./tools/write.js";
+import { registerManageTools } from "./tools/manage.js";
+import { registerCalendarTools } from "./tools/calendar.js";
+import { registerCrossTools } from "./tools/cross.js";
 
 // Validate required environment variables
 const email = process.env.ICLOUD_EMAIL;

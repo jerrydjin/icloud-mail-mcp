@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { ImapProvider } from "../providers/imap.ts";
+import type { ImapProvider } from "../providers/imap.js";
 
 export function registerManageTools(
   server: McpServer,

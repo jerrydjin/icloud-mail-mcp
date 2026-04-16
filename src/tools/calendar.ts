@@ -1,8 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { CalDavProvider } from "../providers/caldav.ts";
-import type { CalendarEvent } from "../types.ts";
-import { resolveTimezone, formatInTimezone } from "../utils/timezone.ts";
+import type { CalDavProvider } from "../providers/caldav.js";
+import type { CalendarEvent } from "../types.js";
+import { resolveTimezone, formatInTimezone } from "../utils/timezone.js";
 
 function formatEventForDisplay(event: CalendarEvent, displayTimezone: string) {
   return {

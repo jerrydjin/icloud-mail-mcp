@@ -1,6 +1,6 @@
 import nodemailer from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
-import type { ServiceProvider, SendResult } from "../types.ts";
+import type { ServiceProvider, SendResult } from "../types.js";
 
 // SMTP sends are NEVER retried automatically. If the connection drops mid-send,
 // the server may have already accepted the email. Retrying risks duplicate delivery.

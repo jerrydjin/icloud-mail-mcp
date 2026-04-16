@@ -6,7 +6,7 @@ import {
   formatInTimezone,
   buildVTimezone,
   registerTimezone,
-} from "../src/utils/timezone.ts";
+} from "../src/utils/timezone.js";
 
 // ── VTODO Filtering ──
 // Mirrors the filter in CalDavProvider.listCalendars()
