@@ -14,7 +14,7 @@ import {
   buildVTimezone,
   localToUtc,
 } from "../utils/timezone.js";
-import { buildRRule } from "../utils/rrule.js";
+import { buildRRule, weekdayOfStart } from "../utils/rrule.js";
 
 // CalDAV is stateless HTTP with Basic auth per request.
 // No persistent connection, no keepalive, no NOOP equivalent.
@@ -235,7 +235,20 @@ export class CalDavProvider implements ServiceProvider {
 
     let rruleStr: string | undefined;
     if (event.recurrence) {
-      rruleStr = buildRRule(event.recurrence, timezone, !!event.isAllDay);
+      let recurrence = event.recurrence;
+      // iCloud silently drops WEEKLY RRULEs without BYDAY; infer from DTSTART.
+      if (
+        recurrence.frequency === "WEEKLY" &&
+        (!recurrence.byWeekday || recurrence.byWeekday.length === 0)
+      ) {
+        recurrence = {
+          ...recurrence,
+          byWeekday: [
+            weekdayOfStart(event.start, timezone, !!event.isAllDay),
+          ],
+        };
+      }
+      rruleStr = buildRRule(recurrence, timezone, !!event.isAllDay);
       const recur = ICAL.Recur.fromString(rruleStr);
       vevent.updatePropertyWithValue("rrule", recur);
     }
@@ -261,13 +274,30 @@ export class CalDavProvider implements ServiceProvider {
     comp.addSubcomponent(vevent);
     const iCalString = comp.toString();
 
-    const result = await this.client!.createCalendarObject({
+    const response = await this.client!.createCalendarObject({
       calendar: { url: calendarUrl } as DAVCalendar,
       filename: `${uid}.ics`,
       iCalString,
     });
 
-    const resultObj = result as unknown as Record<string, unknown> | undefined;
+    // tsdav returns the raw fetch Response without throwing on 4xx/5xx.
+    // A successful CalDAV PUT returns 2xx *and* an ETag header. Absence of
+    // either means iCloud rejected the object (often a malformed RRULE,
+    // e.g. WEEKLY without BYDAY) — surface it instead of fake-succeeding.
+    const etag = response.headers.get("etag") ?? undefined;
+    if (!response.ok || !etag) {
+      let body = "";
+      try {
+        body = await response.text();
+      } catch {
+        /* ignore */
+      }
+      throw new Error(
+        `CalDAV PUT rejected (status ${response.status} ${response.statusText}${etag ? "" : ", no ETag"}). ` +
+          `Response: ${body.slice(0, 500) || "<empty>"}`
+      );
+    }
+    const resultUrl = response.url || `${calendarUrl}${uid}.ics`;
 
     // Build TimezoneAwareTime for the return value
     let startTz: TimezoneAwareTime;
@@ -297,8 +327,8 @@ export class CalDavProvider implements ServiceProvider {
       recurrenceRule: rruleStr,
       calendarUrl,
       calendarName,
-      url: (resultObj?.url as string) ?? `${calendarUrl}${uid}.ics`,
-      etag: resultObj?.etag as string | undefined,
+      url: resultUrl,
+      etag,
     };
   }
 

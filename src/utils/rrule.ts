@@ -1,5 +1,54 @@
-import type { RecurrenceInput } from "../types.js";
+import type { RecurrenceInput, RecurrenceWeekday } from "../types.js";
 import { localToUtc } from "./timezone.js";
+
+const WEEKDAY_CODES: RecurrenceWeekday[] = [
+  "SU",
+  "MO",
+  "TU",
+  "WE",
+  "TH",
+  "FR",
+  "SA",
+];
+
+/**
+ * Derive the RFC 5545 two-letter weekday code (MO..SU) from a local
+ * DTSTART as observed in the event's timezone. iCloud silently rejects
+ * WEEKLY RRULEs that omit BYDAY, so we auto-populate it from DTSTART.
+ */
+export function weekdayOfStart(
+  startLocalISO: string,
+  timezone: string,
+  isAllDay: boolean
+): RecurrenceWeekday {
+  const datePart = startLocalISO.split("T")[0] ?? startLocalISO;
+  let instant: Date;
+  if (isAllDay) {
+    instant = new Date(`${datePart}T00:00:00Z`);
+    return WEEKDAY_CODES[instant.getUTCDay()]!;
+  }
+  const utcIso = localToUtc(startLocalISO.replace(/Z$/, ""), timezone);
+  instant = new Date(utcIso);
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "short",
+  });
+  const short = fmt.format(instant);
+  const map: Record<string, RecurrenceWeekday> = {
+    Sun: "SU",
+    Mon: "MO",
+    Tue: "TU",
+    Wed: "WE",
+    Thu: "TH",
+    Fri: "FR",
+    Sat: "SA",
+  };
+  const code = map[short];
+  if (!code) {
+    throw new Error(`Could not derive weekday from "${startLocalISO}" in ${timezone}`);
+  }
+  return code;
+}
 
 /**
  * Build an RFC 5545 RRULE property value (without the "RRULE:" prefix) from

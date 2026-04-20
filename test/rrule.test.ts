@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildRRule } from "../src/utils/rrule.js";
+import { buildRRule, weekdayOfStart } from "../src/utils/rrule.js";
 import type { RecurrenceInput } from "../src/types.js";
 
 describe("buildRRule", () => {
@@ -91,5 +91,35 @@ describe("buildRRule", () => {
       byWeekday: ["TU", "TH"],
     };
     expect(buildRRule(r, "UTC", false)).toBe("FREQ=WEEKLY;BYDAY=TU,TH");
+  });
+});
+
+describe("weekdayOfStart", () => {
+  test("derives MO for Monday in UTC", () => {
+    // 2026-04-13 is a Monday
+    expect(weekdayOfStart("2026-04-13T09:00:00", "UTC", false)).toBe("MO");
+  });
+
+  test("derives the wall-clock weekday in the event's timezone", () => {
+    // 2026-04-21T10:00:00 Melbourne (AEST +10) → Tuesday there,
+    // but the UTC instant is Tue 00:00 UTC — still Tuesday.
+    expect(
+      weekdayOfStart("2026-04-21T10:00:00", "Australia/Melbourne", false)
+    ).toBe("TU");
+  });
+
+  test("timezone can flip the weekday relative to UTC", () => {
+    // 2026-04-20T23:00:00 in Australia/Sydney is Monday local time,
+    // but 13:00 UTC Monday — both Monday, same answer.
+    // For a flip: 2026-04-21T02:00:00 Sydney = Tue 2am local = Mon 16:00 UTC.
+    // Function should return TU (Sydney wall-clock), not MO (UTC).
+    expect(
+      weekdayOfStart("2026-04-21T02:00:00", "Australia/Sydney", false)
+    ).toBe("TU");
+  });
+
+  test("all-day uses the date as-is", () => {
+    // 2030-01-01 is a Tuesday
+    expect(weekdayOfStart("2030-01-01", "UTC", true)).toBe("TU");
   });
 });
