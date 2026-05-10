@@ -455,6 +455,140 @@ try {
   await imapForStaleness.disconnect();
 }
 
+// ── H. v4.3.1 dogfood instrumentation — shapedBy round-trip ──
+//
+// Verifies the M4.3 v1 ship-gate instrumentation:
+//   1. triageCommitHandler accepts shapedBy: string[] without schema/type error.
+//   2. When shapedBy is non-empty, handler emits a console.log line with
+//      event:'triage_shaped' and the verbatim shapedBy + outcome.
+//   3. When shapedBy is absent, no triage_shaped line is emitted.
+//
+// READ-ONLY: passes empty `proposed` (no reminder/event/draft), so runLegs
+// returns an empty result without touching iCloud. Tests the logging plumbing
+// only, which is what the gate measures.
+
+const tokenSecret = process.env.CONFIRM_TOKEN_SECRET;
+if (!tokenSecret) {
+  console.log(
+    "\n[H] v4.3.1 shapedBy round-trip — SKIPPED (CONFIRM_TOKEN_SECRET not set)"
+  );
+} else {
+  console.log("\n[H] v4.3.1 shapedBy round-trip");
+  try {
+    const { signProposal } = await import("./src/utils/confirm-token.js");
+    const { triageCommitHandler } = await import(
+      "./src/verbs/triage-commit.js"
+    );
+
+    // Empty proposed → no legs run, no iCloud calls; ctx is never dereferenced.
+    const proposedEmpty = { contacts: [] as unknown[] };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fakeCtx = {} as any;
+    const token = await signProposal(proposedEmpty, tokenSecret);
+
+    // Helper to capture stdout from console.log around a single call. Restores
+    // console.log before pass()/fail() so test output stays clean.
+    async function captureLogs(
+      run: () => Promise<unknown>
+    ): Promise<{ captured: string[]; result: unknown; err: unknown }> {
+      const captured: string[] = [];
+      const originalLog = console.log;
+      console.log = (...args: unknown[]) => {
+        captured.push(args.map(String).join(" "));
+        originalLog(...args);
+      };
+      let result: unknown;
+      let err: unknown;
+      try {
+        result = await run();
+      } catch (e) {
+        err = e;
+      } finally {
+        console.log = originalLog;
+      }
+      return { captured, result, err };
+    }
+
+    // Positive case: shapedBy present → emits triage_shaped line.
+    const positive = await captureLogs(() =>
+      triageCommitHandler(
+        {
+          confirmToken: token,
+          proposed: proposedEmpty,
+          shapedBy: ["lastReplyFromYou"],
+        },
+        fakeCtx
+      )
+    );
+    if (positive.err) throw positive.err;
+    pass("triageCommitHandler accepts shapedBy without error");
+
+    const shapedLine = positive.captured.find((l) =>
+      l.includes('"event":"triage_shaped"')
+    );
+    if (!shapedLine) {
+      throw new Error(
+        `expected triage_shaped log line; captured ${positive.captured.length} line(s)`
+      );
+    }
+    const parsed = JSON.parse(shapedLine);
+    if (!parsed.shapedBy?.includes("lastReplyFromYou")) {
+      throw new Error(
+        `triage_shaped log shapedBy missing 'lastReplyFromYou': ${shapedLine}`
+      );
+    }
+    if (!["success", "partial"].includes(parsed.outcome)) {
+      throw new Error(
+        `triage_shaped outcome must be 'success' or 'partial', got '${parsed.outcome}'`
+      );
+    }
+    if (typeof parsed.ts !== "string" || !parsed.ts.includes("T")) {
+      throw new Error(`triage_shaped ts must be ISO 8601, got '${parsed.ts}'`);
+    }
+    pass(
+      `triage_shaped log emitted: shapedBy=${JSON.stringify(parsed.shapedBy)}, outcome=${parsed.outcome}, legs=${JSON.stringify(parsed.legs)}`
+    );
+
+    // Negative case: shapedBy absent → no triage_shaped line.
+    const negative = await captureLogs(() =>
+      triageCommitHandler(
+        { confirmToken: token, proposed: proposedEmpty },
+        fakeCtx
+      )
+    );
+    if (negative.err) throw negative.err;
+    if (
+      negative.captured.find((l) => l.includes('"event":"triage_shaped"'))
+    ) {
+      throw new Error(
+        "triage_shaped line emitted when shapedBy was absent — should be silent"
+      );
+    }
+    pass("No triage_shaped log when shapedBy is absent");
+
+    // Negative case: shapedBy empty array → no line either.
+    const empty = await captureLogs(() =>
+      triageCommitHandler(
+        {
+          confirmToken: token,
+          proposed: proposedEmpty,
+          shapedBy: [],
+        },
+        fakeCtx
+      )
+    );
+    if (empty.err) throw empty.err;
+    if (empty.captured.find((l) => l.includes('"event":"triage_shaped"'))) {
+      throw new Error(
+        "triage_shaped line emitted when shapedBy was empty array — should be silent"
+      );
+    }
+    pass("No triage_shaped log when shapedBy is empty array");
+  } catch (err) {
+    fail("H. v4.3.1 shapedBy round-trip", err);
+  }
+}
+
 // ── Summary ──
 
 console.log("\n=== Summary ===");

@@ -61,7 +61,7 @@ const contactsProvider = new ContactsProvider(carddavUrl, email, password);
 // Create MCP server
 const server = new McpServer({
   name: "icloud-mcp",
-  version: "4.3.0",
+  version: "4.3.1",
 });
 
 // v4 M4.1: identity resolver, request-scoped on Vercel and process-scoped on stdio

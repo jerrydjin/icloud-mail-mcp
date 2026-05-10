@@ -32,6 +32,39 @@ import type {
   ProposedDraft,
 } from "./triage-types.js";
 
+// ── Dogfood instrumentation (M4.3 v1 ship-gate, v4.3.1) ──
+
+/**
+ * Emit a structured log line for ship-gate measurement when the LLM caller
+ * passes a non-empty `shapedBy` array on triage_commit (or _retry).
+ *
+ * Lands in Vercel function logs in production (filesystem is ephemeral, no KV);
+ * on stdio the line goes to stdout. End-of-window aggregation: pull
+ * `vercel logs --since=Nh`, grep `"event":"triage_shaped"`, count distinct
+ * calendar days. Per the M4.3 v1 design, ≥5 distinct days = pass.
+ *
+ * Token-rejected commits do not log (the early return in triageCommitHandler
+ * happens before this point); thrown errors caught by the verb wrapper also do
+ * not log. Both gaps are intentional — neither path represents a shaping
+ * decision the user actually committed on.
+ */
+function emitShapedLog(
+  shapedBy: string[] | undefined,
+  legs: ("reminder" | "event" | "draft")[],
+  result: VerbResult<CommitResult>
+): void {
+  if (!shapedBy || shapedBy.length === 0) return;
+  console.log(
+    JSON.stringify({
+      event: "triage_shaped",
+      ts: new Date().toISOString(),
+      shapedBy,
+      legs,
+      outcome: result.items.partial ? "partial" : "success",
+    })
+  );
+}
+
 // ── Verb registration: triage_commit ──
 
 export function registerTriageCommitVerb(
@@ -74,6 +107,12 @@ export function registerTriageCommitVerb(
           contacts: z.array(z.unknown()).default([]),
         })
         .describe("The `proposed` block from the TriagePlan (verbatim)"),
+      shapedBy: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Optional dogfood instrumentation: free-form labels for daily_brief fields the LLM caller used to shape this triage decision. Examples: 'lastReplyFromYou', 'awaitingYourReply'. When present and non-empty, server emits a structured log entry. Safe to omit; no behavioral change."
+        ),
     },
     async (input) => {
       try {
@@ -95,6 +134,7 @@ export async function triageCommitHandler(
       draft?: ProposedDraft;
       contacts: unknown[];
     };
+    shapedBy?: string[];
   },
   ctx: VerbContext
 ): Promise<VerbResult<CommitResult>> {
@@ -113,7 +153,9 @@ export async function triageCommitHandler(
   if (input.proposed.event) legsToRun.push("event");
   if (input.proposed.draft) legsToRun.push("draft");
 
-  return await runLegs(legsToRun, input.proposed, ctx);
+  const result = await runLegs(legsToRun, input.proposed, ctx);
+  emitShapedLog(input.shapedBy, legsToRun, result);
+  return result;
 }
 
 // ── Verb registration: triage_commit_retry ──
@@ -160,6 +202,12 @@ export function registerTriageCommitRetryVerb(
             .optional(),
         })
         .describe("Same proposed shape as triage_commit, scoped to the legs being retried"),
+      shapedBy: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Optional dogfood instrumentation: same shape as triage_commit.shapedBy. When present and non-empty, server emits a structured log entry. Safe to omit; no behavioral change."
+        ),
     },
     async (input) => {
       try {
@@ -180,6 +228,7 @@ export async function triageCommitRetryHandler(
       event?: ProposedEvent;
       draft?: ProposedDraft;
     };
+    shapedBy?: string[];
   },
   ctx: VerbContext
 ): Promise<VerbResult<CommitResult>> {
@@ -189,7 +238,9 @@ export async function triageCommitRetryHandler(
     draft: input.legs.includes("draft") ? input.payload.draft : undefined,
     contacts: [] as unknown[],
   };
-  return await runLegs(input.legs, proposed, ctx);
+  const result = await runLegs(input.legs, proposed, ctx);
+  emitShapedLog(input.shapedBy, input.legs, result);
+  return result;
 }
 
 // ── Per-leg execution ──

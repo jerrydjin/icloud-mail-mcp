@@ -1,5 +1,67 @@
 # Changelog
 
+## 4.3.1 — M4.3 v1 ship-gate instrumentation (`shapedBy` flag)
+
+Closes the M4.3 v1 ship gate that v4.3.0 deferred. The 5-day dogfood window
+("the field shapes ≥1 triage decision/day") was vibes-only as written; this
+release makes it auditable. No behavior change — `triage_commit` /
+`triage_commit_retry` still execute identically when `shapedBy` is absent.
+
+### Added
+
+- `shapedBy?: string[]` optional field on `triage_commit` and
+  `triage_commit_retry` Zod schemas. Free-form labels for `daily_brief` fields
+  the LLM caller used to shape the triage decision. Examples:
+  `'lastReplyFromYou'`, `'awaitingYourReply'`. Generalizes to future M4.3.x
+  fields (`'priorityScore'`, `'attendees'`, `'reminderMention'`).
+- `emitShapedLog()` — private helper in `src/verbs/triage-commit.ts`. When
+  `shapedBy` is non-empty, emits a single-line
+  `console.log(JSON.stringify({event: 'triage_shaped', ts, shapedBy, legs, outcome}))`
+  after `runLegs` returns. Lands in Vercel function logs (no KV, no filesystem
+  write) so end-of-window grep pulls structured signal from existing
+  infrastructure. Local stdio mode also works — line goes to stdout.
+- Smoke test section H — `triage_commit` `shapedBy` round-trip. Patches
+  `console.log`, calls `triageCommitHandler` with `shapedBy: ['lastReplyFromYou']`
+  on an empty `proposed` (no iCloud writes), asserts a parseable
+  `event: triage_shaped` log line emits with the verbatim `shapedBy` and
+  `outcome: 'success' | 'partial'`. Negative cases: `shapedBy` absent or empty
+  array must NOT emit. Skipped silently when `CONFIRM_TOKEN_SECRET` is unset.
+
+### Changed
+
+- `triageCommitHandler` and `triageCommitRetryHandler` — restructured the final
+  `return await runLegs(...)` into `const result = await runLegs(...);
+  emitShapedLog(input.shapedBy, legs, result); return result;`. Per-leg
+  semantics unchanged.
+- `package.json`, `src/server.ts`, `api/mcp.ts` — version bump to `4.3.1`.
+
+### Architecture notes (Vercel-serverless honest)
+
+The dogfood log lives in Vercel function logs, NOT in a Vercel KV cache or a
+local jsonl. This matches the M4.3 architectural lock-in (no KV, no
+cross-invocation persistence). The log line is single-line JSON so it's
+greppable from `vercel logs --since=Nh | grep triage_shaped | jq`. End-of-
+window aggregation: distinct calendar days with ≥1 entry; ≥5 days = pass.
+
+Token-rejected commits (bad/expired `confirmToken`) do NOT log — the early
+return in `triageCommitHandler` happens before the emit point. Thrown errors
+caught by the outer verb wrapper also do not log. Both are intentional gaps:
+neither path represents a shaping decision the user actually committed on.
+
+### Ship-gate items still owed
+
+Per the v4.3.1 design doc:
+
+1. Live iCloud round-trip via `bun run smoke-test` — verify M4.3 v1 fields
+   populate AND new section H passes. Required before deploy.
+2. Pre-deploy p95 cold-start (10 samples on v4.3.0, ~60 min span) BEFORE the
+   v4.3.1 commit lands on main. Captured manually from Vercel dashboard.
+3. Post-deploy p95 cold-start (10 samples on v4.3.1) — compare to (2);
+   doubling triggers revert per design premise 7.
+4. 5-day dogfood window kicked off at v4.3.1 deploy. Honest tagging only.
+   End-of-window aggregation: ≥5 distinct calendar days with `triage_shaped`
+   log entries = pass.
+
 ## 4.3.0 — Brief intelligence: response staleness (M4.3 v1)
 
 Every recent inbound message in `daily_brief.mail.recentMessages[]` now knows
